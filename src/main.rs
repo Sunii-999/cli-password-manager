@@ -1,25 +1,26 @@
 mod handlers;
 
-use argon2::password_hash::SaltString;
 use handlers::Entry;
 use std::io::{self, Read, Write};
 use std::fs::{self, OpenOptions};
-use argon2::{Argon2, PasswordHasher, password_hash::Salt};
+
+// Encryption Imports
+use aes_gcm::{aead::{Aead, AeadCore, KeyInit}, Aes256Gcm, Key, Nonce};
 use rand::rngs::OsRng;
-
-
+use base64::{Engine as _, engine::general_purpose};
 use serde_json;
 
 fn main() {
+    let master_key_bytes = [0u8; 32]; // 32 bytes = 256 bits
     let choices = ["Add new", "List passwords", "Search", "Quit"];
-
+    clr();
     loop {
-        println!("\nPassword manager:");
+        println!("\n--- Password Manager ---");
         for (i, v) in choices.iter().enumerate() {
             println!("{}. {}", i + 1, v);
         }
 
-        print!("\nAwaiting input... ");
+        print!("\nAwaiting input: ");
         io::stdout().flush().unwrap();
 
         let mut selection = String::new();
@@ -27,6 +28,7 @@ fn main() {
 
         match selection.trim().parse::<u32>() {
             Ok(1) => {
+                clr();
                 println!("Service:");
                 let service = read_line();
 
@@ -35,34 +37,62 @@ fn main() {
 
                 println!("Password:");
                 let password = read_line();
-                let salt_str = SaltString::generate(&mut OsRng);
-                let salt: Salt = Salt::from(&salt_str);
 
-                let argon2 = Argon2::default();
-                let hash = argon2.hash_password(password.as_bytes(), salt).unwrap();
+                let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&master_key_bytes));
+                let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
 
-                let def_password = hash.to_string();
+                let ciphertext = cipher.encrypt(&nonce, password.as_bytes())
+                    .expect("Encryption failed");
+
+                let mut encrypted_packet = nonce.to_vec();
+                encrypted_packet.extend_from_slice(&ciphertext);
+
+                let encrypted_string = general_purpose::STANDARD.encode(encrypted_packet);
+
+                println!("Is this correct?:");
+                println!("service: {}", service);
+                println!("username: {}", username);
+                println!("password: {}", password);
+
+                verify_input();
 
                 if confirm_action() {
                     let entry = Entry {
                         service,
                         username,
-                        password_hash: def_password,
+                        password_hash: encrypted_string,
                     };
                     save_entry(entry);
-                    println!("Saved.");
+                    println!("Saved encrypted credential.");
                 }
             },
             Ok(2) => {
                 clr();
-                let contents = fs::read_to_string("passwords.json").expect("Something went wrong reading the file");
+                if !std::path::Path::new("passwords.json").exists() {
+                    println!("No passwords found. Try adding one first.");
+                    continue;
+                }
 
-                let entries : Vec<Entry> = serde_json::from_str(&contents).expect("REASON");
+                let contents = fs::read_to_string("passwords.json")
+                    .expect("Something went wrong reading the file");
+
+                let entries: Vec<Entry> = serde_json::from_str(&contents)
+                    .unwrap_or_else(|_| Vec::new()); 
 
                 println!("Stored Credentials:");
+                println!("-------------------");
                 for (index, entry) in entries.iter().enumerate() {
-                    println!("{}. {} ({})", index + 1, entry.service, entry.username);
+                    
+                    let cleartext = decrypt_value(&entry.password_hash, &master_key_bytes);
+                    
+                    println!("{}. {} | User: {} | Pass: {}", 
+                        index + 1, 
+                        entry.service, 
+                        entry.username, 
+                        cleartext
+                    );
                 }
+                println!("-------------------");
             }
             Ok(4) => {
                 println!("Goodbye!");
@@ -80,22 +110,36 @@ fn read_line() -> String {
     s.trim().to_string()
 }
 
-
 fn confirm_action() -> bool {
     loop {
         println!("Do you wish to proceed? (y/n)");
-
         let mut input = String::new();
         io::stdin().read_line(&mut input).unwrap();
+        let clean = input.trim().to_lowercase();
 
-        let clean_input = input.trim().to_lowercase();
-
-        if clean_input == "y" || clean_input == "yes" {
+        if clean == "y" || clean == "yes" {
             return true;
-        } else if clean_input == "n" || clean_input == "no" {
+        } else if clean == "n" || clean == "no" {
             return false;
         } else {
-            println!("Invalid input. Please type 'y' for yes or 'n' for no.");
+            println!("Invalid input.");
+        }
+    }
+}
+
+fn verify_input() -> bool {
+    loop {
+        println!("Double check, is this correct?? (y/n)");
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).unwrap();
+        let clean = input.trim().to_lowercase();
+
+        if clean == "y" || clean == "yes" {
+            return true;
+        } else if clean == "n" || clean == "no" {
+            return false;
+        } else {
+            println!("Invalid input.");
         }
     }
 }
@@ -107,6 +151,7 @@ fn clr() {
 fn save_entry(entry: Entry) {
     let path = "passwords.json";
 
+    // 1. Load existing
     let mut entries: Vec<Entry> = if let Ok(mut file) = OpenOptions::new().read(true).open(path) {
         let mut contents = String::new();
         file.read_to_string(&mut contents).unwrap();
@@ -126,4 +171,25 @@ fn save_entry(entry: Entry) {
         .unwrap();
 
     file.write_all(json.as_bytes()).unwrap();
+}
+
+fn decrypt_value(encrypted_base64: &str, key: &[u8; 32]) -> String {
+    let encrypted_bytes = general_purpose::STANDARD
+        .decode(encrypted_base64)
+        .unwrap_or_else(|_| Vec::new());
+
+    if encrypted_bytes.len() < 12 {
+        return "Invalid Data".to_string();
+    }
+
+    let (nonce_bytes, ciphertext) = encrypted_bytes.split_at(12);
+    
+    let nonce = Nonce::from_slice(nonce_bytes);
+    
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+
+    match cipher.decrypt(nonce, ciphertext) {
+        Ok(plaintext) => String::from_utf8(plaintext).unwrap_or("Bad UTF-8".to_string()),
+        Err(_) => "WRONG KEY / CORRUPT DATA".to_string()
+    }
 }
