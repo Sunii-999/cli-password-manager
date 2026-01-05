@@ -1,10 +1,10 @@
 mod handlers;
-
 use handlers::Entry;
 use std::io::{self, Read, Write};
 use std::fs::{self, OpenOptions};
+use std::error::Error;
 
-// Encryption Imports
+
 use aes_gcm::{aead::{Aead, AeadCore, KeyInit}, Aes256Gcm, Key, Nonce};
 use rand::rngs::OsRng;
 use base64::{Engine as _, engine::general_purpose};
@@ -94,6 +94,25 @@ fn main() {
                 }
                 println!("-------------------");
             }
+            Ok(3) => {
+                clr();
+
+                println!("Search query:");
+                let query = read_line();
+
+                let file_path = "passwords.json".to_string();
+
+                let config = Config {
+                    query,
+                    file_path,
+                    ignore_case: true, // or false, your choice
+                };
+
+                if let Err(e) = run(config, &master_key_bytes) {
+                    eprintln!("Application error: {e}");
+                }
+            }
+
             Ok(4) => {
                 println!("Goodbye!");
                 break;
@@ -112,7 +131,7 @@ fn read_line() -> String {
 
 fn confirm_action() -> bool {
     loop {
-        println!("Do you wish to proceed? (y/n)");
+        println!("\nDo you wish to proceed? (y/n)");
         let mut input = String::new();
         io::stdin().read_line(&mut input).unwrap();
         let clean = input.trim().to_lowercase();
@@ -129,7 +148,7 @@ fn confirm_action() -> bool {
 
 fn verify_input() -> bool {
     loop {
-        println!("Double check, is this correct?? (y/n)");
+        println!("\nDouble check, is this correct?? (y/n)");
         let mut input = String::new();
         io::stdin().read_line(&mut input).unwrap();
         let clean = input.trim().to_lowercase();
@@ -192,4 +211,53 @@ fn decrypt_value(encrypted_base64: &str, key: &[u8; 32]) -> String {
         Ok(plaintext) => String::from_utf8(plaintext).unwrap_or("Bad UTF-8".to_string()),
         Err(_) => "WRONG KEY / CORRUPT DATA".to_string()
     }
+}
+
+fn run(config: Config, master_key: &[u8; 32]) -> Result<(), Box<dyn Error>> {
+    let contents = fs::read_to_string(config.file_path)?;
+    let entries: Vec<Entry> = serde_json::from_str(&contents)?;
+
+    let query = if config.ignore_case {
+        config.query.to_lowercase()
+    } else {
+        config.query.clone()
+    };
+
+    let mut found = false;
+
+    for entry in entries {
+        let service = if config.ignore_case {
+            entry.service.to_lowercase()
+        } else {
+            entry.service.clone()
+        };
+
+        let username = if config.ignore_case {
+            entry.username.to_lowercase()
+        } else {
+            entry.username.clone()
+        };
+
+        if service.contains(&query) || username.contains(&query) {
+            let password = decrypt_value(&entry.password_hash, master_key);
+
+            println!("-------------------");
+            println!("Service : {}", entry.service);
+            println!("Username: {}", entry.username);
+            println!("Password: {}", password);
+            found = true;
+        }
+    }
+
+    if !found {
+        println!("No matching entries found.");
+    }
+
+    Ok(())
+}
+
+pub struct Config {
+    pub query: String,
+    pub file_path: String,
+    pub ignore_case: bool,
 }
