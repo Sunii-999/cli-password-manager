@@ -1,63 +1,85 @@
 mod handlers;
 
-use std::io;
-use std::io::{Write};
+use argon2::password_hash::SaltString;
+use handlers::Entry;
+use std::io::{self, Read, Write};
+use std::fs::{self, OpenOptions};
+use argon2::{Argon2, PasswordHasher, password_hash::Salt};
+use rand::rngs::OsRng;
 
+
+use serde_json;
 
 fn main() {
-    let choices: [&str; 4] = ["Add new", "List passwords", "Search", "Quit"];
+    let choices = ["Add new", "List passwords", "Search", "Quit"];
 
-    println!("Password manager:");
-    println!("(Select by typing number)");
+    loop {
+        println!("\nPassword manager:");
+        for (i, v) in choices.iter().enumerate() {
+            println!("{}. {}", i + 1, v);
+        }
 
-    for (count, v) in choices.into_iter().enumerate() {
-        println!("{}. {}", count + 1, v);
-    }
-
-        println!("\nAwaiting input...");
+        print!("\nAwaiting input... ");
         io::stdout().flush().unwrap();
 
         let mut selection = String::new();
         io::stdin().read_line(&mut selection).unwrap();
 
-        let selection = selection.trim().parse::<u32>();
+        match selection.trim().parse::<u32>() {
+            Ok(1) => {
+                println!("Service:");
+                let service = read_line();
 
-    match selection {
-        Ok(1) => {
-            // clr();
-            println!("Add a new password: Service username password");
-            println!("\nAwaiting input...");
+                println!("Username:");
+                let username = read_line();
 
-            let mut new_password = String::new();
-            io::stdin().read_line(&mut new_password).unwrap();
-            println!("is this correct? {}", new_password);
+                println!("Password:");
+                let password = read_line();
+                let salt_str = SaltString::generate(&mut OsRng);
+                let salt: Salt = Salt::from(&salt_str);
 
+                let argon2 = Argon2::default();
+                let hash = argon2.hash_password(password.as_bytes(), salt).unwrap();
 
-            if confirm_action() {
-                println!("Action confirmed.");
-            } else {
-                println!("Action cancelled.");
-            }
+                let def_password = hash.to_string();
+
+                if confirm_action() {
+                    let entry = Entry {
+                        service,
+                        username,
+                        password_hash: def_password,
+                    };
+                    save_entry(entry);
+                    println!("Saved.");
+                }
             },
             Ok(2) => {
-                println!("List passwords");
-            }
-            Ok(3) => {
-                println!("Search");
-            }
-            Ok(4) => 'block: {
-                println!("Goodbye!");
-                break 'block;
-            }
-            Ok(_) => {
-                println!("Please enter a number between 1 and 4.");
-            }
-            Err(_) => {
-                println!("Invalid input. Please enter a number.");
-            }
-        };
+                clr();
+                let contents = fs::read_to_string("passwords.json").expect("Something went wrong reading the file");
 
+                let entries : Vec<Entry> = serde_json::from_str(&contents).expect("REASON");
+
+                println!("Stored Credentials:");
+                for (index, entry) in entries.iter().enumerate() {
+                    println!("{}. {} ({})", index + 1, entry.service, entry.username);
+                }
+            }
+            Ok(4) => {
+                println!("Goodbye!");
+                break;
+            }
+            Ok(_) => println!("Please enter 1–4."),
+            Err(_) => println!("Invalid input."),
+        }
+    }
 }
+
+fn read_line() -> String {
+    let mut s = String::new();
+    io::stdin().read_line(&mut s).unwrap();
+    s.trim().to_string()
+}
+
 
 fn confirm_action() -> bool {
     loop {
@@ -78,6 +100,30 @@ fn confirm_action() -> bool {
     }
 }
 
-// fn clr() {
-//     print!("{}[2J", 27 as char);
-// }
+fn clr() {
+    print!("{}[2J", 27 as char);
+}
+
+fn save_entry(entry: Entry) {
+    let path = "passwords.json";
+
+    let mut entries: Vec<Entry> = if let Ok(mut file) = OpenOptions::new().read(true).open(path) {
+        let mut contents = String::new();
+        file.read_to_string(&mut contents).unwrap();
+        serde_json::from_str(&contents).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    entries.push(entry);
+
+    let json = serde_json::to_string_pretty(&entries).unwrap();
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .unwrap();
+
+    file.write_all(json.as_bytes()).unwrap();
+}
