@@ -15,7 +15,7 @@ fn main() {
     let choices = ["Add new", "List passwords", "Search", "Quit"];
     clr();
     loop {
-        println!("\n--- Password ManÒ ---");
+        println!("\n--- Password Manager ---");
         for (i, v) in choices.iter().enumerate() {
             println!("{}. {}", i + 1, v);
         }
